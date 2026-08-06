@@ -1,0 +1,22 @@
+[
+  {
+    "timestamp": "2026-08-06T09:09:30.873076",
+    "user_query": "\n    Разработай план по запуску нового онлайн-курса по программированию для начинающих.\n    Целевая аудитория — студенты без опыта. Бюджет — 500 000 рублей.\n    Срок — 3 месяца.\n    ",
+    "current_agent": "ExecutionAgent",
+    "agent_metrics": {},
+    "prompt_versions": {
+      "research": {
+        "version": "v2",
+        "hash": "9bca7217591281179edc40a87c196baa"
+      },
+      "analysis": {
+        "version": "v1",
+        "hash": "fb071b3ae9870d38fb7e4ac4a93b953b"
+      },
+      "execution": {
+        "version": "v1",
+        "hash": "a855cd61ccb983e3a76f8f63da684366"
+      }
+    }
+  }
+]
