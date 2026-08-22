@@ -1,3 +1,4 @@
+# Существующие зависимости
 langgraph>=0.0.20
 langchain>=0.1.0
 yandexcloud>=0.200.0
@@ -7,3 +8,7 @@ requests>=2.31.0
 reportlab>=4.0.0
 langfuse>=2.0.0
 openai>=1.0.0
+
+# НОВЫЕ ЗАВИСИМОСТИ для WIMSE
+PyJWT>=2.8.0
+cryptography>=41.0.0
