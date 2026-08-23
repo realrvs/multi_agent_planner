@@ -1,4 +1,4 @@
-from typing import Dict, Any
+﻿from typing import Dict, Any
 from .base_agent import BaseAgent
 
 class ExecutionAgent(BaseAgent):
@@ -36,6 +36,7 @@ class ExecutionAgent(BaseAgent):
         План должен быть практичным, выполнимым и представлен на русском языке.
         """
         
+        # Используем invoke_with_observability для вызова (с поддержкой мок-режима)
         response = self.invoke_with_observability(prompt)
         
         # Завершаем trace

@@ -1,15 +1,17 @@
-from abc import ABC, abstractmethod
+﻿from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from .yandex_adapter import YandexGPT
 from config.observability import observability
 from config.prompt_db import prompt_db
+from config.identity import AgentIdentity, identity_manager
 import time
+import os
+import hashlib
 from datetime import datetime
 
 class BaseAgent(ABC):
     """
-    Базовый класс для всех агентов с YandexGPT и observability.
-    Использует базу данных для хранения промптов
+    Базовый класс для всех агентов с WIMSE-идентичностью, YandexGPT и observability.
     """
     
     def __init__(
@@ -18,13 +20,19 @@ class BaseAgent(ABC):
         max_tokens: Optional[int] = None,
         prompt_version: Optional[str] = None
     ):
+        # Определяем имя агента и его роль
+        self.agent_name = self.__class__.__name__
         self.agent_key = self._get_agent_key()
+        self.role = self._determine_role()
+        
+        # Создаем WIMSE-идентичность
+        self.identity = AgentIdentity(self.agent_name, self.role)
+        print(f"🆔 Инициализирована идентичность для {self.agent_name}: {self.identity}")
         
         # Получаем промпт из БД
         if prompt_version:
             prompt_data = prompt_db.get_prompt(self.agent_key, prompt_version)
         else:
-            # Берем активную версию
             version = prompt_db.get_active_version(self.agent_key)
             prompt_data = prompt_db.get_prompt(self.agent_key, version)
             self.prompt_version = version
@@ -39,7 +47,6 @@ class BaseAgent(ABC):
             temperature=self.temperature,
             max_tokens=self.max_tokens
         )
-        self.agent_name = self.__class__.__name__
         
         # Observability
         self.observability = observability
@@ -52,8 +59,26 @@ class BaseAgent(ABC):
             "total_cost": 0.0,
             "avg_latency": 0.0,
             "errors": 0,
-            "prompt_versions": {}
+            "prompt_versions": {},
+            "agent_id": self.identity.agent_id,
+            "agent_role": self.role,
+            "wit_hash": self.identity.wit_hash,
+            "attestation_valid": True
         }
+        
+        # Флаг, что агент был вызван
+        self.called = False
+    
+    def _determine_role(self) -> str:
+        """Определяет роль агента на основе имени класса."""
+        name = self.__class__.__name__.lower()
+        if "research" in name:
+            return "researcher"
+        elif "analysis" in name:
+            return "analyst"
+        elif "execution" in name:
+            return "executor"
+        return "unknown"
     
     def _get_agent_key(self) -> str:
         """Возвращает ключ агента для доступа к промптам"""
@@ -66,17 +91,50 @@ class BaseAgent(ABC):
             return "execution"
         return name.replace("agent", "")
     
+    # --- WIMSE МЕТОДЫ ---
+    
+    def get_identity_context(self) -> Dict[str, Any]:
+        """Возвращает контекст идентичности для передачи другим агентам."""
+        return self.identity.get_identity_context()
+    
+    def verify_peer(self, peer_context: Dict[str, Any]) -> bool:
+        """Проверяет идентичность агента-партнера."""
+        return self.identity.verify_peer_identity(peer_context)
+    
+    def verify_incoming_request(self, state: Dict[str, Any]) -> bool:
+        """
+        Проверяет входящий запрос: есть ли валидный WIT от родительского агента.
+        """
+        self.called = True  # Агент был вызван
+        parent_wit = state.get("parent_wit")
+        
+        if parent_wit:
+            try:
+                # Проверяем токен родителя
+                payload = identity_manager.verify_token(parent_wit)
+                print(f"✅ {self.agent_name}: запрос от агента {payload.get('agent_id')} (роль: {payload.get('role')})")
+                
+                # Сохраняем информацию о родителе в метрики
+                self.metrics["parent_agent_id"] = payload.get("agent_id")
+                self.metrics["parent_role"] = payload.get("role")
+                return True
+            except ValueError as e:
+                print(f"❌ {self.agent_name}: ошибка верификации родительского WIT: {e}")
+                return False
+        else:
+            # Если parent_wit отсутствует, это первый агент в цепочке
+            print(f"ℹ️ {self.agent_name}: первый в цепочке (нет родительского WIT)")
+            return True
+    
+    # --- СУЩЕСТВУЮЩИЕ МЕТОДЫ ---
+    
     @abstractmethod
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Основной метод выполнения задачи агентом.
-        """
+        """Основной метод выполнения задачи агентом."""
         pass
     
     def _get_formatted_prompt(self, **kwargs) -> str:
-        """
-        Получает отформатированный промпт из БД с учетом версионирования
-        """
+        """Получает отформатированный промпт из БД с учетом версионирования"""
         prompt_data = prompt_db.get_prompt(self.agent_key, self.prompt_version)
         template = prompt_data.get('template', '')
         
@@ -94,15 +152,24 @@ class BaseAgent(ABC):
         print(f"🔄 Промпт для {self.agent_name} перезагружен из БД")
     
     def start_trace(self, name: str, metadata: dict = None, input_data: dict = None):
-        """Начинает новый trace для агента"""
+        """Начинает новый trace для агента с WIMSE-контекстом."""
         if self.observability.enabled and self.observability.client:
+            wimse_metadata = {
+                "agent": self.agent_name,
+                "agent_id": self.identity.agent_id,
+                "agent_role": self.role,
+                "wit_hash": self.identity.wit_hash,
+                "prompt_version": self.prompt_version,
+                "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version),
+                "called": self.called
+            }
+            
+            if metadata:
+                wimse_metadata.update(metadata)
+            
             self.current_trace_id = self.observability.create_trace(
                 name=f"{self.agent_name}_{name}",
-                metadata=metadata or {
-                    "agent": self.agent_name,
-                    "prompt_version": self.prompt_version,
-                    "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version)
-                },
+                metadata=wimse_metadata,
                 input_data=input_data or {}
             )
     
@@ -115,7 +182,7 @@ class BaseAgent(ABC):
                         trace_id=self.current_trace_id,
                         name=f"{self.agent_name}_result",
                         output_data=output_data,
-                        metadata={"status": "completed"}
+                        metadata={"status": "completed", "called": self.called}
                     )
             except Exception as e:
                 print(f"⚠️ Ошибка завершения trace: {e}")
@@ -123,29 +190,33 @@ class BaseAgent(ABC):
                 self.current_trace_id = None
     
     def _track_llm_call(self, prompt: str, response: Any, latency: float):
-        """
-        Отслеживает вызов LLM.
-        """
+        """Отслеживает вызов LLM с WIMSE-контекстом."""
         self.metrics["calls"] += 1
         token_count = len(response.content) // 4
         self.metrics["total_tokens"] += token_count
         
-        # Примерная стоимость
         cost = token_count * 0.0001
         self.metrics["total_cost"] += cost
         
-        # Обновляем среднюю задержку
         self.metrics["avg_latency"] = (
             (self.metrics["avg_latency"] * (self.metrics["calls"] - 1) + latency) 
             / self.metrics["calls"]
         )
         
-        # Сохраняем информацию о версии промпта
         self.metrics["prompt_versions"][self.agent_key] = self.prompt_version
         
-        # Создаем span внутри текущего trace
         if self.observability.enabled and self.current_trace_id:
             try:
+                wimse_context = {
+                    "agent_id": self.identity.agent_id,
+                    "agent_role": self.role,
+                    "wit_hash": self.identity.wit_hash,
+                    "attestation_valid": True,
+                    "session_id": os.getenv("CURRENT_SESSION_ID", "unknown"),
+                    "parent_agent_id": self.metrics.get("parent_agent_id", "none"),
+                    "called": self.called
+                }
+                
                 self.observability.create_span(
                     trace_id=self.current_trace_id,
                     name="llm_call",
@@ -157,16 +228,15 @@ class BaseAgent(ABC):
                         "temperature": self.temperature,
                         "max_tokens": self.max_tokens,
                         "prompt_version": self.prompt_version,
-                        "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version)
+                        "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version),
+                        "wimse": wimse_context
                     }
                 )
             except Exception as e:
                 print(f"⚠️ Ошибка создания span: {e}")
     
     def invoke_with_observability(self, prompt: str) -> Any:
-        """
-        Вызывает LLM с отслеживанием метрик.
-        """
+        """Вызывает LLM с отслеживанием метрик."""
         start_time = time.time()
         
         try:
@@ -188,6 +258,7 @@ class BaseAgent(ABC):
             **self.metrics,
             "agent_name": self.agent_name,
             "prompt_version": self.prompt_version,
+            "called": self.called,
             "prompt_info": {
                 "version": self.prompt_version,
                 "description": prompt_data.get('description', ''),

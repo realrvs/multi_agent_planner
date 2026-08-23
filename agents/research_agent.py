@@ -1,4 +1,4 @@
-from typing import Dict, Any
+﻿from typing import Dict, Any
 from .base_agent import BaseAgent
 
 class ResearchAgent(BaseAgent):
@@ -31,6 +31,7 @@ class ResearchAgent(BaseAgent):
         Ответ представь в виде структурированного отчёта на русском языке.
         """
         
+        # ВАЖНО: используем invoke_with_observability для вызова
         response = self.invoke_with_observability(prompt)
         
         # Завершаем trace
