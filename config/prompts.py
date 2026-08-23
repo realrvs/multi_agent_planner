@@ -1,10 +1,10 @@
-from typing import Dict, Any
+﻿from typing import Dict, Any
 import json
 import hashlib
 from datetime import datetime
 
 class PromptVersioning:
-    """Система версионирования промптов"""
+    """Система версионирования промптов с политиками безопасности"""
     
     PROMPTS = {
         "research": {
@@ -26,7 +26,15 @@ class PromptVersioning:
                 "version": "v1",
                 "created_at": "2024-01-01",
                 "temperature": 0.3,
-                "max_tokens": 2000
+                "max_tokens": 2000,
+                "security_policy": {
+                    "role": "researcher",
+                    "allowed_next_agents": ["AnalysisAgent"],
+                    "allowed_tools": ["search", "read", "analyze"],
+                    "max_context_length": 4000,
+                    "requires_human_approval": False,
+                    "can_call_llm": True
+                }
             },
             "v2": {
                 "template": """
@@ -50,7 +58,15 @@ class PromptVersioning:
                 "version": "v2",
                 "created_at": "2024-01-15",
                 "temperature": 0.4,
-                "max_tokens": 2500
+                "max_tokens": 2500,
+                "security_policy": {
+                    "role": "researcher",
+                    "allowed_next_agents": ["AnalysisAgent"],
+                    "allowed_tools": ["search", "read", "analyze", "web_search"],
+                    "max_context_length": 5000,
+                    "requires_human_approval": False,
+                    "can_call_llm": True
+                }
             }
         },
         "analysis": {
@@ -75,7 +91,15 @@ class PromptVersioning:
                 "version": "v1",
                 "created_at": "2024-01-01",
                 "temperature": 0.3,
-                "max_tokens": 2000
+                "max_tokens": 2000,
+                "security_policy": {
+                    "role": "analyst",
+                    "allowed_next_agents": ["ExecutionAgent"],
+                    "allowed_tools": ["analyze", "compute", "summarize"],
+                    "max_context_length": 6000,
+                    "requires_human_approval": False,
+                    "can_call_llm": True
+                }
             }
         },
         "execution": {
@@ -101,14 +125,22 @@ class PromptVersioning:
                 "version": "v1",
                 "created_at": "2024-01-01",
                 "temperature": 0.3,
-                "max_tokens": 2000
+                "max_tokens": 2000,
+                "security_policy": {
+                    "role": "executor",
+                    "allowed_next_agents": ["FINISH"],
+                    "allowed_tools": ["execute", "plan", "schedule"],
+                    "max_context_length": 8000,
+                    "requires_human_approval": True,  # Критическое действие!
+                    "can_call_llm": True
+                }
             }
         }
     }
     
     def __init__(self):
         self.current_versions = {
-            "research": "v2",  # Используем новую версию
+            "research": "v2",
             "analysis": "v1",
             "execution": "v1"
         }
@@ -121,14 +153,19 @@ class PromptVersioning:
         
         return self.PROMPTS.get(agent_name, {}).get(version, {})
     
+    def get_policy(self, agent_name: str, version: str = None) -> Dict[str, Any]:
+        """Получить политику безопасности для агента"""
+        prompt_data = self.get_prompt(agent_name, version)
+        return prompt_data.get("security_policy", {})
+    
     def get_prompt_hash(self, agent_name: str, version: str = None) -> str:
         """Получить хеш промпта для отслеживания изменений"""
         prompt_data = self.get_prompt(agent_name, version)
         if not prompt_data:
             return ""
         
-        # Хешируем содержимое промпта
-        content = prompt_data.get("template", "")
+        # Хешируем содержимое промпта + политику
+        content = prompt_data.get("template", "") + json.dumps(prompt_data.get("security_policy", {}))
         return hashlib.md5(content.encode()).hexdigest()
     
     def switch_version(self, agent_name: str, version: str):
@@ -149,5 +186,35 @@ class PromptVersioning:
             "hash": self.get_prompt_hash(agent_name, version),
             "metadata": prompt_data
         }
+    
+    def check_policy(self, agent_name: str, action: str, target: str = None) -> bool:
+        """
+        Проверяет, разрешено ли действие для агента согласно политике.
+        
+        Args:
+            agent_name: Имя агента (research, analysis, execution)
+            action: Тип действия (delegate, call_llm, tool_call)
+            target: Целевой объект (имя следующего агента, инструмент и т.д.)
+        
+        Returns:
+            True если действие разрешено, иначе False
+        """
+        policy = self.get_policy(agent_name)
+        
+        if action == "delegate":
+            allowed = policy.get("allowed_next_agents", [])
+            return target in allowed
+        
+        elif action == "call_llm":
+            return policy.get("can_call_llm", False)
+        
+        elif action == "tool_call":
+            allowed_tools = policy.get("allowed_tools", [])
+            return target in allowed_tools
+        
+        elif action == "human_approval":
+            return policy.get("requires_human_approval", False)
+        
+        return False
 
 prompt_versioning = PromptVersioning()

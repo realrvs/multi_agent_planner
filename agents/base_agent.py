@@ -4,6 +4,7 @@ from .yandex_adapter import YandexGPT
 from config.observability import observability
 from config.prompt_db import prompt_db
 from config.identity import AgentIdentity, identity_manager
+from config.prompts import prompt_versioning
 import time
 import os
 import hashlib
@@ -42,6 +43,10 @@ class BaseAgent(ABC):
         self.max_tokens = max_tokens if max_tokens is not None else prompt_data.get('max_tokens', 2000)
         self.prompt_version = prompt_version or prompt_data.get('version', 'v1')
         
+        # Загружаем политику безопасности из prompts.py
+        self.policy = prompt_versioning.get_policy(self.agent_key)
+        print(f"📋 Загружена политика для {self.agent_name}: {self.policy}")
+        
         # Инициализация LLM
         self.llm = YandexGPT(
             temperature=self.temperature,
@@ -63,7 +68,8 @@ class BaseAgent(ABC):
             "agent_id": self.identity.agent_id,
             "agent_role": self.role,
             "wit_hash": self.identity.wit_hash,
-            "attestation_valid": True
+            "attestation_valid": True,
+            "policy_checks": {}
         }
         
         # Флаг, что агент был вызван
@@ -105,16 +111,14 @@ class BaseAgent(ABC):
         """
         Проверяет входящий запрос: есть ли валидный WIT от родительского агента.
         """
-        self.called = True  # Агент был вызван
+        self.called = True
         parent_wit = state.get("parent_wit")
         
         if parent_wit:
             try:
-                # Проверяем токен родителя
                 payload = identity_manager.verify_token(parent_wit)
                 print(f"✅ {self.agent_name}: запрос от агента {payload.get('agent_id')} (роль: {payload.get('role')})")
                 
-                # Сохраняем информацию о родителе в метрики
                 self.metrics["parent_agent_id"] = payload.get("agent_id")
                 self.metrics["parent_role"] = payload.get("role")
                 return True
@@ -122,9 +126,40 @@ class BaseAgent(ABC):
                 print(f"❌ {self.agent_name}: ошибка верификации родительского WIT: {e}")
                 return False
         else:
-            # Если parent_wit отсутствует, это первый агент в цепочке
             print(f"ℹ️ {self.agent_name}: первый в цепочке (нет родительского WIT)")
             return True
+    
+    def check_policy(self, action: str, target: str = None) -> bool:
+        """
+        Проверяет, разрешено ли действие согласно политике.
+        
+        Args:
+            action: Тип действия (delegate, call_llm, tool_call)
+            target: Целевой объект
+        
+        Returns:
+            True если действие разрешено
+        """
+        result = prompt_versioning.check_policy(self.agent_key, action, target)
+        
+        # Логируем проверку политики
+        check_key = f"{action}_{target}" if target else action
+        self.metrics["policy_checks"][check_key] = result
+        
+        if not result:
+            print(f"❌ {self.agent_name}: политика запрещает действие '{action}' с целью '{target}'")
+        
+        return result
+    
+    def enforce_policy(self, action: str, target: str = None) -> None:
+        """
+        Принудительно проверяет политику и вызывает ошибку, если действие запрещено.
+        """
+        if not self.check_policy(action, target):
+            raise PermissionError(
+                f"Агент {self.agent_name} (роль: {self.role}) не имеет прав на действие '{action}' "
+                f"с целью '{target}'"
+            )
     
     # --- СУЩЕСТВУЮЩИЕ МЕТОДЫ ---
     
@@ -149,7 +184,8 @@ class BaseAgent(ABC):
         prompt_data = prompt_db.get_prompt(self.agent_key, self.prompt_version)
         self.temperature = prompt_data.get('temperature', 0.3)
         self.max_tokens = prompt_data.get('max_tokens', 2000)
-        print(f"🔄 Промпт для {self.agent_name} перезагружен из БД")
+        self.policy = prompt_versioning.get_policy(self.agent_key)
+        print(f"🔄 Промпт и политика для {self.agent_name} перезагружены из БД")
     
     def start_trace(self, name: str, metadata: dict = None, input_data: dict = None):
         """Начинает новый trace для агента с WIMSE-контекстом."""
@@ -161,7 +197,8 @@ class BaseAgent(ABC):
                 "wit_hash": self.identity.wit_hash,
                 "prompt_version": self.prompt_version,
                 "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version),
-                "called": self.called
+                "called": self.called,
+                "policy": self.policy
             }
             
             if metadata:
@@ -214,7 +251,8 @@ class BaseAgent(ABC):
                     "attestation_valid": True,
                     "session_id": os.getenv("CURRENT_SESSION_ID", "unknown"),
                     "parent_agent_id": self.metrics.get("parent_agent_id", "none"),
-                    "called": self.called
+                    "called": self.called,
+                    "policy_checks": self.metrics["policy_checks"]
                 }
                 
                 self.observability.create_span(
@@ -236,7 +274,10 @@ class BaseAgent(ABC):
                 print(f"⚠️ Ошибка создания span: {e}")
     
     def invoke_with_observability(self, prompt: str) -> Any:
-        """Вызывает LLM с отслеживанием метрик."""
+        """Вызывает LLM с отслеживанием метрик и проверкой политики."""
+        # Проверяем политику перед вызовом LLM
+        self.enforce_policy("call_llm")
+        
         start_time = time.time()
         
         try:
@@ -259,6 +300,7 @@ class BaseAgent(ABC):
             "agent_name": self.agent_name,
             "prompt_version": self.prompt_version,
             "called": self.called,
+            "policy": self.policy,
             "prompt_info": {
                 "version": self.prompt_version,
                 "description": prompt_data.get('description', ''),
@@ -276,5 +318,6 @@ class BaseAgent(ABC):
             "total_cost": 0.0,
             "avg_latency": 0.0,
             "errors": 0,
-            "prompt_versions": {}
+            "prompt_versions": {},
+            "policy_checks": {}
         }

@@ -17,7 +17,10 @@ def research_node(state):
     # Проверяем входящий запрос
     research_agent.verify_incoming_request(state)
     
-    # Сохраняем WIT текущего агента в состояние ДО вызова run
+    # Проверяем политику делегирования
+    research_agent.enforce_policy("delegate", "AnalysisAgent")
+    
+    # Сохраняем WIT текущего агента в состояние
     state["parent_wit"] = research_agent.identity.wit_token
     state["current_agent_identity"] = research_agent.get_identity_context()
     state["current_agent"] = "ResearchAgent"
@@ -33,8 +36,11 @@ def research_node(state):
     return result
 
 def analysis_node(state):
-    # Проверяем входящий запрос (должен содержать WIT от ResearchAgent)
+    # Проверяем входящий запрос
     analysis_agent.verify_incoming_request(state)
+    
+    # Проверяем политику делегирования
+    analysis_agent.enforce_policy("delegate", "ExecutionAgent")
     
     # Сохраняем WIT текущего агента в состояние
     state["parent_wit"] = analysis_agent.identity.wit_token
@@ -52,8 +58,11 @@ def analysis_node(state):
     return result
 
 def execution_node(state):
-    # Проверяем входящий запрос (должен содержать WIT от AnalysisAgent)
+    # Проверяем входящий запрос
     execution_agent.verify_incoming_request(state)
+    
+    # Проверяем политику: ExecutionAgent может делегировать только FINISH
+    execution_agent.enforce_policy("delegate", "FINISH")
     
     # Сохраняем WIT текущего агента
     state["current_agent_identity"] = execution_agent.get_identity_context()
@@ -61,6 +70,16 @@ def execution_node(state):
     
     # Вызываем агента
     result = execution_agent.run(state)
+    
+    # Проверяем, требуется ли одобрение человека для выполнения плана
+    requires_approval = execution_agent.check_policy("human_approval")
+    if requires_approval:
+        print("⚠️ ВНИМАНИЕ: Действие требует одобрения человека!")
+        result["requires_human_approval"] = True
+        result["execution_plan_approved"] = False
+    else:
+        result["requires_human_approval"] = False
+        result["execution_plan_approved"] = True
     
     # Передаём WIT дальше
     result["parent_wit"] = execution_agent.identity.wit_token
@@ -78,6 +97,10 @@ def finalize_node(state):
     if hasattr(execution_agent, 'called') and execution_agent.called:
         agents_called.append("ExecutionAgent")
     
+    # Получаем статус одобрения
+    approved = state.get("execution_plan_approved", False)
+    requires_approval = state.get("requires_human_approval", False)
+    
     final_answer = f"""
     ## ✅ Итоговый план действий
     
@@ -91,13 +114,17 @@ def finalize_node(state):
     {state.get('execution_plan', 'Нет плана')}
     """
     
-    # Добавляем информацию о безопасности в ответ
+    # Добавляем информацию о безопасности и политиках
     security_info = f"""
     ### 🔐 Информация о безопасности (WIMSE):
     - Выполненные агенты: {', '.join(agents_called) if agents_called else 'Ни один агент не был вызван'}
     - Цепочка агентов: ResearchAgent → AnalysisAgent → ExecutionAgent
     - Сессия: {state.get('session_id', 'не указана')}
     - User ID: {state.get('user_id', 'не указан')}
+    
+    ### 🛡️ Политики безопасности:
+    - Требуется одобрение человека: {'✅ Да' if requires_approval else '❌ Нет'}
+    - План одобрен: {'✅ Да' if approved else '⏳ Ожидает одобрения'}
     """
     
     final_answer += security_info
@@ -105,5 +132,7 @@ def finalize_node(state):
     return {
         "final_answer": final_answer,
         "next_agent": "END",
-        "current_agent": "FinalizeAgent"
+        "current_agent": "FinalizeAgent",
+        "execution_plan_approved": approved,
+        "requires_human_approval": requires_approval
     }
