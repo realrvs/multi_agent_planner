@@ -1,0 +1,20 @@
+{
+  "session_id": "48f21b45-8543-4af1-9f76-050d8e4f1589",
+  "user_id": "test_user_001",
+  "timestamp": "2026-08-23T05:58:45.637129",
+  "state": {
+    "research": true,
+    "analysis": true,
+    "execution": true,
+    "requires_approval": false,
+    "approved": false
+  },
+  "audit_summary": {
+    "session_id": "48f21b45-8543-4af1-9f76-050d8e4f1589",
+    "user_id": "test_user_001",
+    "trace_id": null,
+    "events_count": 0,
+    "enabled": false,
+    "timestamp": "2026-08-23T05:58:45.635437"
+  }
+}

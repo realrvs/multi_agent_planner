@@ -5,6 +5,7 @@ from config.observability import observability
 from config.prompt_db import prompt_db
 from config.identity import AgentIdentity, identity_manager
 from config.prompts import prompt_versioning
+from config.wimse_audit import wimse_audit
 import time
 import os
 import hashlib
@@ -12,19 +13,25 @@ from datetime import datetime
 
 class BaseAgent(ABC):
     """
-    Базовый класс для всех агентов с WIMSE-идентичностью, YandexGPT и observability.
+    Базовый класс для всех агентов с WIMSE-идентичностью, YandexGPT, observability и аудитом.
     """
     
     def __init__(
         self,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        prompt_version: Optional[str] = None
+        prompt_version: Optional[str] = None,
+        session_id: str = None,
+        user_id: str = None
     ):
         # Определяем имя агента и его роль
         self.agent_name = self.__class__.__name__
         self.agent_key = self._get_agent_key()
         self.role = self._determine_role()
+        
+        # Сохраняем информацию о сессии
+        self.session_id = session_id or os.getenv("CURRENT_SESSION_ID", f"session_{int(time.time())}")
+        self.user_id = user_id or os.getenv("CURRENT_USER_ID", "unknown_user")
         
         # Создаем WIMSE-идентичность
         self.identity = AgentIdentity(self.agent_name, self.role)
@@ -57,6 +64,10 @@ class BaseAgent(ABC):
         self.observability = observability
         self.current_trace_id = None
         
+        # Инициализируем аудит
+        if not wimse_audit.session_id:
+            wimse_audit.start_session(self.session_id, self.user_id)
+        
         # Метрики
         self.metrics = {
             "calls": 0,
@@ -69,11 +80,24 @@ class BaseAgent(ABC):
             "agent_role": self.role,
             "wit_hash": self.identity.wit_hash,
             "attestation_valid": True,
-            "policy_checks": {}
+            "policy_checks": {},
+            "policy_audit": [],
+            "session_id": self.session_id,
+            "user_id": self.user_id
         }
         
         # Флаг, что агент был вызван
         self.called = False
+        
+        # Устанавливаем WIMSE-контекст в observability
+        self.observability.set_wimse_context({
+            "agent_id": self.identity.agent_id,
+            "agent_role": self.role,
+            "agent_name": self.agent_name,
+            "prompt_version": self.prompt_version,
+            "session_id": self.session_id,
+            "user_id": self.user_id
+        })
     
     def _determine_role(self) -> str:
         """Определяет роль агента на основе имени класса."""
@@ -132,22 +156,33 @@ class BaseAgent(ABC):
     def check_policy(self, action: str, target: str = None) -> bool:
         """
         Проверяет, разрешено ли действие согласно политике.
-        
-        Args:
-            action: Тип действия (delegate, call_llm, tool_call)
-            target: Целевой объект
-        
-        Returns:
-            True если действие разрешено
         """
         result = prompt_versioning.check_policy(self.agent_key, action, target)
         
         # Логируем проверку политики
         check_key = f"{action}_{target}" if target else action
         self.metrics["policy_checks"][check_key] = result
+        self.metrics["policy_audit"].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "action": action,
+            "target": target,
+            "result": result
+        })
+        
+        # Отправляем событие в Langfuse для аудита
+        if self.current_trace_id and self.observability.enabled:
+            wimse_audit.log_policy_check(
+                agent_name=self.agent_name,
+                policy_action=action,
+                target=target or "N/A",
+                result=result,
+                trace_id=self.current_trace_id
+            )
         
         if not result:
             print(f"❌ {self.agent_name}: политика запрещает действие '{action}' с целью '{target}'")
+        else:
+            print(f"✅ {self.agent_name}: политика разрешает действие '{action}' с целью '{target}'")
         
         return result
     
@@ -198,7 +233,9 @@ class BaseAgent(ABC):
                 "prompt_version": self.prompt_version,
                 "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version),
                 "called": self.called,
-                "policy": self.policy
+                "policy": self.policy,
+                "session_id": self.session_id,
+                "user_id": self.user_id
             }
             
             if metadata:
@@ -208,6 +245,15 @@ class BaseAgent(ABC):
                 name=f"{self.agent_name}_{name}",
                 metadata=wimse_metadata,
                 input_data=input_data or {}
+            )
+            
+            # Логируем действие в аудит
+            wimse_audit.log_agent_action(
+                agent_name=self.agent_name,
+                action=f"start_{name}",
+                input_data=input_data,
+                metadata=wimse_metadata,
+                trace_id=self.current_trace_id
             )
     
     def end_trace(self, output_data: dict = None):
@@ -221,13 +267,22 @@ class BaseAgent(ABC):
                         output_data=output_data,
                         metadata={"status": "completed", "called": self.called}
                     )
+                    
+                    # Логируем завершение в аудит
+                    wimse_audit.log_agent_action(
+                        agent_name=self.agent_name,
+                        action=f"end_result",
+                        output_data=output_data,
+                        metadata={"status": "completed"},
+                        trace_id=self.current_trace_id
+                    )
             except Exception as e:
                 print(f"⚠️ Ошибка завершения trace: {e}")
             finally:
                 self.current_trace_id = None
     
     def _track_llm_call(self, prompt: str, response: Any, latency: float):
-        """Отслеживает вызов LLM с WIMSE-контекстом."""
+        """Отслеживает вызов LLM с WIMSE-контекстом и аудитом."""
         self.metrics["calls"] += 1
         token_count = len(response.content) // 4
         self.metrics["total_tokens"] += token_count
@@ -244,12 +299,22 @@ class BaseAgent(ABC):
         
         if self.observability.enabled and self.current_trace_id:
             try:
+                llm_metrics = {
+                    "latency": latency,
+                    "tokens": token_count,
+                    "cost": cost,
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "prompt_version": self.prompt_version
+                }
+                
                 wimse_context = {
                     "agent_id": self.identity.agent_id,
                     "agent_role": self.role,
                     "wit_hash": self.identity.wit_hash,
                     "attestation_valid": True,
-                    "session_id": os.getenv("CURRENT_SESSION_ID", "unknown"),
+                    "session_id": self.session_id,
+                    "user_id": self.user_id,
                     "parent_agent_id": self.metrics.get("parent_agent_id", "none"),
                     "called": self.called,
                     "policy_checks": self.metrics["policy_checks"]
@@ -261,15 +326,21 @@ class BaseAgent(ABC):
                     input_data={"prompt": prompt[:500]},
                     output_data={"response": response.content[:500]},
                     metadata={
-                        "latency": latency,
-                        "tokens": token_count,
-                        "temperature": self.temperature,
-                        "max_tokens": self.max_tokens,
-                        "prompt_version": self.prompt_version,
+                        **llm_metrics,
                         "prompt_hash": prompt_db.get_prompt_hash(self.agent_key, self.prompt_version),
                         "wimse": wimse_context
                     }
                 )
+                
+                # Логируем LLM вызов в аудит
+                wimse_audit.log_llm_call(
+                    agent_name=self.agent_name,
+                    prompt=prompt,
+                    response=response.content,
+                    metrics=llm_metrics,
+                    trace_id=self.current_trace_id
+                )
+                
             except Exception as e:
                 print(f"⚠️ Ошибка создания span: {e}")
     
@@ -293,7 +364,7 @@ class BaseAgent(ABC):
             raise e
     
     def get_metrics(self) -> Dict[str, Any]:
-        """Возвращает собранные метрики"""
+        """Возвращает собранные метрики с аудит-информацией"""
         prompt_data = prompt_db.get_prompt(self.agent_key, self.prompt_version)
         return {
             **self.metrics,
@@ -301,6 +372,7 @@ class BaseAgent(ABC):
             "prompt_version": self.prompt_version,
             "called": self.called,
             "policy": self.policy,
+            "audit_summary": wimse_audit.get_audit_summary(),
             "prompt_info": {
                 "version": self.prompt_version,
                 "description": prompt_data.get('description', ''),
@@ -319,5 +391,6 @@ class BaseAgent(ABC):
             "avg_latency": 0.0,
             "errors": 0,
             "prompt_versions": {},
-            "policy_checks": {}
+            "policy_checks": {},
+            "policy_audit": []
         }
