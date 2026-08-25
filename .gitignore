@@ -33,3 +33,10 @@ Thumbs.db
 # Project specific
 metrics_latest.json
 reports/*.pdf
+# Data folders (local volumes)
+clickhouse_data/
+minio_data/
+postgres_data/
+qdrant_storage/
+redis_data/
+qdrant_storage/
