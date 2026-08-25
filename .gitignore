@@ -40,3 +40,6 @@ postgres_data/
 qdrant_storage/
 redis_data/
 qdrant_storage/
+
+__pycache__/
+*.pyc
