@@ -9,10 +9,11 @@ class ResearchAgent(BaseAgent):
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         query = state.get("user_query", "")
         
-        # Начинаем trace
+        print(f"🔍 ResearchAgent: Запрос получен (длина: {len(query)})")
+        
         self.start_trace(
             name="research",
-            input_data={"query": query},
+            input_data={"query": query[:500]},
             metadata={"agent": "ResearchAgent"}
         )
         
@@ -31,12 +32,17 @@ class ResearchAgent(BaseAgent):
         Ответ представь в виде структурированного отчёта на русском языке.
         """
         
-        # ВАЖНО: используем invoke_with_observability для вызова
-        response = self.invoke_with_observability(prompt)
+        try:
+            response = self.invoke_with_observability(prompt)
+            print(f"✅ ResearchAgent: LLM ответил (длина: {len(response.content)})")
+        except Exception as e:
+            print(f"❌ ResearchAgent: Ошибка при вызове LLM: {e}")
+            raise
         
-        # Завершаем trace
         self.end_trace(output_data={"research_data": response.content[:500]})
         
+        # ВОЗВРАЩАЕМ ТОЛЬКО ТО, ЧТО ИЗМЕНИЛОСЬ
+        # НЕ возвращаем email_from или другие поля, которые не менялись
         return {
             "research_data": response.content,
             "current_agent": self.agent_name,

@@ -15,7 +15,6 @@ import time
 import re
 from dotenv import load_dotenv
 
-# Загружаем .env при импорте модуля
 load_dotenv()
 
 from .base_agent import BaseAgent
@@ -27,11 +26,6 @@ class ReadEmailAgent(BaseAgent):
     """
 
     def __init__(self, poll_interval: int = 60, max_emails: int = 5, **kwargs):
-        """
-        Args:
-            poll_interval: Интервал проверки новых писем (сек)
-            max_emails: Максимальное количество писем за один раз
-        """
         super().__init__(require_llm=False, **kwargs)
         self.poll_interval = poll_interval
         self.max_emails = max_emails
@@ -53,20 +47,33 @@ class ReadEmailAgent(BaseAgent):
             f.write(f"{email_id}\n")
         self.processed_ids.add(email_id)
 
-    def _decode_subject(self, subject: str) -> str:
-        if not subject:
+    def _decode_header(self, header: str) -> str:
+        """Декодирует заголовок письма (адрес, тему) с поддержкой KOI8-R."""
+        if not header:
             return ""
-        decoded_parts = decode_header(subject)
-        decoded_str = ""
+        decoded_parts = decode_header(header)
+        result = []
         for part, encoding in decoded_parts:
             if isinstance(part, bytes):
-                try:
-                    decoded_str += part.decode(encoding if encoding else "utf-8", errors="replace")
-                except (LookupError, UnicodeDecodeError):
-                    decoded_str += part.decode("utf-8", errors="replace")
+                # Пробуем разные кодировки
+                for enc in [encoding, 'utf-8', 'koi8-r', 'cp1251', 'latin-1']:
+                    if enc:
+                        try:
+                            decoded = part.decode(enc, errors='replace')
+                            result.append(decoded)
+                            break
+                        except (LookupError, UnicodeDecodeError):
+                            continue
+                else:
+                    # Если ничего не подошло
+                    result.append(part.decode('utf-8', errors='replace'))
             else:
-                decoded_str += str(part)
-        return decoded_str.strip()
+                result.append(str(part))
+        return ' '.join(result)
+
+    def _decode_subject(self, subject: str) -> str:
+        """Декодирует тему письма."""
+        return self._decode_header(subject)
 
     def _get_email_body(self, msg) -> str:
         if msg.is_multipart():
@@ -152,8 +159,9 @@ class ReadEmailAgent(BaseAgent):
                 raw_email = msg_data[0][1]
                 msg = email.message_from_bytes(raw_email)
 
-                subject = self._decode_subject(msg.get("Subject", ""))
-                from_addr = msg.get("From", "")
+                # Декодируем заголовки
+                from_addr = self._decode_header(msg.get("From", ""))
+                subject = self._decode_header(msg.get("Subject", ""))
                 date = msg.get("Date", "")
 
                 body = self._get_email_body(msg)
@@ -205,10 +213,8 @@ class SendEmailAgent(BaseAgent):
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         print("📤 Отправка ответа...")
 
+        # Получаем адрес получателя
         to_addr = state.get("email_from")
-        subject = state.get("email_subject", "Ответ на ваше обращение")
-        reply_body = state.get("final_answer")
-
         if not to_addr:
             print("⚠️ Нет адреса для отправки")
             return {
@@ -216,6 +222,18 @@ class SendEmailAgent(BaseAgent):
                 "current_agent": self.agent_name,
                 "next_agent": "FINISH"
             }
+
+        # Извлекаем email из строки вида "Имя <email@domain.com>"
+        if '<' in to_addr and '>' in to_addr:
+            # Извлекаем email из угловых скобок
+            import re
+            match = re.search(r'<([^>]+)>', to_addr)
+            if match:
+                to_addr = match.group(1)
+                print(f"📧 Извлечён email: {to_addr}")
+
+        reply_body = state.get("final_answer")
+        subject = state.get("email_subject", "Ответ на ваше обращение")
 
         if not reply_body:
             print("⚠️ Нет текста ответа")

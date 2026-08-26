@@ -1,14 +1,7 @@
 ﻿from typing import Literal
 from langgraph.graph import StateGraph, END
 from graph.state import PlannerState
-from graph.nodes import (
-    read_email_node,
-    research_node,
-    analysis_node,
-    execution_node,
-    finalize_node,
-    send_email_node
-)
+from graph import nodes  # Импортируем весь модуль
 from config.observability import observability
 
 def build_planner_graph():
@@ -17,13 +10,13 @@ def build_planner_graph():
     """
     workflow = StateGraph(PlannerState)
 
-    # Добавляем узлы
-    workflow.add_node("read_email", read_email_node)
-    workflow.add_node("research", research_node)
-    workflow.add_node("analysis", analysis_node)
-    workflow.add_node("execution", execution_node)
-    workflow.add_node("finalize", finalize_node)
-    workflow.add_node("send_email", send_email_node)
+    # Добавляем узлы через модуль nodes
+    workflow.add_node("read_email", nodes.read_email_node)
+    workflow.add_node("research", nodes.research_node)
+    workflow.add_node("analysis", nodes.analysis_node)
+    workflow.add_node("execution", nodes.execution_node)
+    workflow.add_node("finalize", nodes.finalize_node)
+    workflow.add_node("send_email", nodes.send_email_node)
 
     # Устанавливаем начальную точку
     workflow.set_entry_point("read_email")
