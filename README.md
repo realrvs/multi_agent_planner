@@ -368,6 +368,4 @@ Multi-System Environments) и готов к использованию в enterp
 ✅ Email-интеграция (IMAP/SMTP)
 ✅ Human-in-the-Loop
 
-'@ | Out-File -FilePath "README.md" -Encoding utf8
-
 Write-Host "✅ README.md обновлён!"
